@@ -76,5 +76,6 @@ Sound effects and music
 Better balancing for lane generation
 Mobile or touch support for the browser version
 More obstacle and platform types
-License
-No license is currently specified. Add one if you plan to distribute the project publicly.
+
+Website:-
+https://froggy-game-navy.vercel.app/
