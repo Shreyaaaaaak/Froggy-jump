@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Froggy Jump 🐸</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d0d1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+  }
+  canvas {
+    border: 2px solid #00ff88;
+    box-shadow: 0 0 30px rgba(0,255,136,0.2);
+    display: block;
+  }
+  #subtitle {
+    color: #00ff8866;
+    font-size: 12px;
+    margin-top: 10px;
+    letter-spacing: 2px;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="subtitle">USE ARROW KEYS TO PLAY</div>
+<script>
+  const canvas = document.getElementById('game')
+  const ctx    = canvas.getContext('2d')
+
+  // ── Constants ─────────────────────────────────────────────────────
+  const TILE        = 44
+  const COLS        = 14
+  const TOP_BANK    = 0
+  const BOTTOM_BANK = 9
+  const NUM_LANES   = 8
+  const LIVES_START = 3
+
+  canvas.width  = COLS * TILE       // 616px
+  canvas.height = 12 * TILE         // 528px
+
+  // ── Lane configs: [speed tiles/sec, direction, type] ─────────────
+  // Speeds are gentler — enjoyable not punishing
+  const LANE_CONFIGS = [
+    [2.5, -1, 'log'],
+    [2.0,  1, 'lily'],
+    [3.0, -1, 'log'],
+    [2.2,  1, 'lily'],
+    [2.8, -1, 'log'],
+    [1.8,  1, 'lily'],
+    [3.2, -1, 'log'],
+    [2.0,  1, 'lily'],
+  ]
+
+  // ── Lane helpers ──────────────────────────────────────────────────
+  function makeLanes(level) {
+    const boost = 1 + (level - 1) * 0.18   // 18% faster per level
+    return LANE_CONFIGS.map(([spd, dir, type]) => ({
+      pattern: Array.from({ length: COLS }, () =>
+        Math.random() < 0.38 ? type : 'water'),
+      offset: 0,
+      speed:  spd * boost,
+      dir,
+      type,
+    }))
+  }
+
+  function cellAt(lane, col) {
+    const idx = Math.floor(col + lane.offset)
+    return lane.pattern[((idx % COLS) + COLS) % COLS]
+  }
+
+  function updateLanes(lanes, dt) {
+    for (const lane of lanes) {
+      lane.offset += lane.speed * lane.dir * dt
+      lane.offset  = ((lane.offset % COLS) + COLS) % COLS
+    }
+  }
+
+  // ── Collision ─────────────────────────────────────────────────────
+  function checkCollision(frog, lanes) {
+    const row = Math.round(frog.y / TILE)
+    const col = Math.round(frog.x / TILE)
+    if (row === TOP_BANK)    return 'won'
+    if (row === BOTTOM_BANK) return 'safe'
+    const cell = cellAt(lanes[row - TOP_BANK - 1], col)
+    return cell === 'lily' ? 'safe' : 'dead'
+  }
+
+  // ── Game state ────────────────────────────────────────────────────
+  let state      = 'splash'
+  let lanes      = makeLanes(1)
+  let lives      = LIVES_START
+  let score      = 0
+  let level      = 1
+  let deathTimer = 0
+  let message    = ''
+  let msgTimer   = 0
+  let particles  = []   // celebration particles on win
+
+  const frog = { x: 0, y: 0 }
+
+  function resetFrog() {
+    frog.x = Math.floor(COLS / 2) * TILE
+    frog.y = BOTTOM_BANK * TILE
+  }
+
+  function startGame() {
+    lanes  = makeLanes(level)
+    lives  = LIVES_START
+    score  = 0
+    level  = 1
+    state  = 'playing'
+    message = ''
+    particles = []
+    resetFrog()
+  }
+
+  function flash(msg, t = 1.8) { message = msg; msgTimer = t }
+
+  // ── Particles (win celebration) ───────────────────────────────────
+  function spawnParticles() {
+    for (let i = 0; i < 40; i++) {
+      particles.push({
+        x:    frog.x + TILE / 2,
+        y:    frog.y + TILE / 2,
+        vx:   (Math.random() - 0.5) * 200,
+        vy:   (Math.random() - 1.2) * 180,
+        life: 1.0,
+        color: ['#ffd700','#ff69b4','#00ff88','#48cae4'][Math.floor(Math.random()*4)],
+        size: Math.random() * 5 + 3,
+      })
+    }
+  }
+
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.x    += p.vx * dt
+      p.y    += p.vy * dt
+      p.vy   += 200 * dt   // gravity
+      p.life -= dt * 1.2
+    }
+    particles = particles.filter(p => p.life > 0)
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      ctx.globalAlpha = p.life
+      ctx.fillStyle   = p.color
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    ctx.globalAlpha = 1
+  }
+
+  // ── Input ─────────────────────────────────────────────────────────
+  document.addEventListener('keydown', e => {
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key))
+      e.preventDefault()
+
+    // Splash / level screen → any key starts / continues
+    if (state === 'splash' || state === 'levelup') {
+      if (e.key === ' ' || e.key.startsWith('Arrow')) {
+        if (state === 'splash') startGame()
+        else nextLevel()
+      }
+      return
+    }
+
+    if (state === 'gameover') {
+      if (e.key === ' ' || e.key === 'r' || e.key === 'R') startGame()
+      return
+    }
+
+    if (state === 'playing') {
+      if (e.key === 'ArrowUp')    frog.y = Math.max(TOP_BANK * TILE,    frog.y - TILE)
+      if (e.key === 'ArrowDown')  frog.y = Math.min(BOTTOM_BANK * TILE, frog.y + TILE)
+      if (e.key === 'ArrowLeft')  frog.x = Math.max(0,                  frog.x - TILE)
+      if (e.key === 'ArrowRight') frog.x = Math.min((COLS-1) * TILE,    frog.x + TILE)
+    }
+  })
+
+  function nextLevel() {
+    level++
+    lanes     = makeLanes(level)
+    state     = 'playing'
+    particles = []
+    resetFrog()
+  }
+
+  // ── Update ────────────────────────────────────────────────────────
+  function update(dt) {
+    if (state !== 'playing' && state !== 'dead') return
+
+    updateLanes(lanes, dt)
+    updateParticles(dt)
+
+    if (msgTimer > 0) { msgTimer -= dt; if (msgTimer <= 0) message = '' }
+
+    if (state === 'playing') {
+      const result = checkCollision(frog, lanes)
+
+      if (result === 'won') {
+        const bonus = 100 + level * 50
+        score += bonus
+        spawnParticles()
+        flash(`🎉  +${bonus} pts!`, 1.5)
+        state = 'dead'          // reuse deathTimer for win pause
+        deathTimer = 1.5
+        // After pause go to level-up screen
+        setTimeout(() => { if (state !== 'gameover') state = 'levelup' }, 1500)
+      }
+
+      else if (result === 'dead') {
+        lives--
+        state      = 'dead'
+        deathTimer = 0.7
+        flash(lives > 0 ? `💀  ${lives} ${lives===1?'life':'lives'} left` : '💀  No more lives!')
+      }
+    }
+
+    else if (state === 'dead') {
+      deathTimer -= dt
+      if (deathTimer <= 0) {
+        if (lives <= 0) {
+          state = 'gameover'
+        } else if (message === '') {
+          resetFrog()
+          state = 'playing'
+        }
+      }
+    }
+  }
+
+  // ── Draw helpers ──────────────────────────────────────────────────
+  function drawBank(row, label, isGoal) {
+    // Grass texture — two-tone stripes
+    for (let c = 0; c < COLS; c++) {
+      ctx.fillStyle = c % 2 === 0 ? '#2d6a4f' : '#276045'
+      ctx.fillRect(c * TILE, row * TILE, TILE, TILE)
+    }
+    // Label
+    ctx.font = 'bold 15px monospace'
+    ctx.textAlign = 'center'
+    ctx.fillStyle = isGoal ? '#ffd700' : '#95d5b2'
+    ctx.fillText(label, canvas.width / 2, row * TILE + TILE / 2 + 6)
+  }
+
+  function drawLanes(lanes) {
+    for (let i = 0; i < NUM_LANES; i++) {
+      const lane = lanes[i]
+      const rowY = (TOP_BANK + 1 + i) * TILE
+
+      // Water bg
+      ctx.fillStyle = i % 2 === 0 ? '#03449e' : '#0353a4'
+      ctx.fillRect(0, rowY, canvas.width, TILE)
+
+      // Ripple lines
+      ctx.strokeStyle = i % 2 === 0 ? '#0466c8' : '#0353a4'
+      ctx.lineWidth = 1
+      for (let r = 0; r < 3; r++) {
+        ctx.beginPath()
+        ctx.moveTo(0, rowY + 8 + r * 12)
+        ctx.lineTo(canvas.width, rowY + 8 + r * 12)
+        ctx.stroke()
+      }
+
+      for (let col = 0; col < COLS; col++) {
+        const cell = cellAt(lane, col)
+        const x = col * TILE, y = rowY
+
+        if (cell === 'log') {
+          // Log body
+          ctx.fillStyle = '#7c4a1e'
+          ctx.beginPath()
+          ctx.roundRect(x+2, y+8, TILE-4, TILE-16, 4)
+          ctx.fill()
+          // Grain
+          ctx.strokeStyle = '#5a3614'
+          ctx.lineWidth = 1
+          for (let g = 0; g < 3; g++) {
+            ctx.beginPath()
+            ctx.moveTo(x+4, y+10+g*6)
+            ctx.lineTo(x+TILE-4, y+10+g*6)
+            ctx.stroke()
+          }
+          // End caps
+          ctx.fillStyle = '#a0632a'
+          ctx.beginPath()
+          ctx.roundRect(x+2, y+8, 7, TILE-16, [4,0,0,4])
+          ctx.fill()
+          ctx.beginPath()
+          ctx.roundRect(x+TILE-9, y+8, 7, TILE-16, [0,4,4,0])
+          ctx.fill()
+
+        } else if (cell === 'lily') {
+          // Shadow
+          ctx.fillStyle = 'rgba(0,0,0,0.2)'
+          ctx.beginPath()
+          ctx.ellipse(x+TILE/2+2, y+TILE/2+2, TILE/2-5, TILE/2-8, 0, 0, Math.PI*2)
+          ctx.fill()
+          // Pad
+          ctx.fillStyle = '#40b560'
+          ctx.beginPath()
+          ctx.arc(x+TILE/2, y+TILE/2, TILE/2-5, 0, Math.PI*2)
+          ctx.fill()
+          // Notch
+          ctx.fillStyle = i % 2 === 0 ? '#03449e' : '#0353a4'
+          ctx.beginPath()
+          ctx.moveTo(x+TILE/2, y+TILE/2)
+          ctx.arc(x+TILE/2, y+TILE/2, TILE/2-5, -0.5, 0.5)
+          ctx.closePath()
+          ctx.fill()
+          // Veins
+          ctx.strokeStyle = '#2d8a4a'
+          ctx.lineWidth = 1
+          ctx.beginPath()
+          ctx.moveTo(x+TILE/2, y+TILE/2)
+          ctx.lineTo(x+TILE/2, y+8)
+          ctx.moveTo(x+TILE/2, y+TILE/2)
+          ctx.lineTo(x+10, y+TILE/2+8)
+          ctx.moveTo(x+TILE/2, y+TILE/2)
+          ctx.lineTo(x+TILE-10, y+TILE/2+8)
+          ctx.stroke()
+          // Flower
+          ctx.fillStyle = '#ff85c2'
+          ctx.beginPath()
+          ctx.arc(x+TILE/2, y+TILE/2, 5, 0, Math.PI*2)
+          ctx.fill()
+          ctx.fillStyle = '#ffd700'
+          ctx.beginPath()
+          ctx.arc(x+TILE/2, y+TILE/2, 2.5, 0, Math.PI*2)
+          ctx.fill()
+        }
+      }
+    }
+  }
+
+  function drawFrog() {
+    const isDead = state === 'dead' && lives < LIVES_START
+    const x = frog.x, y = frog.y
+    const s = TILE - 4
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)'
+    ctx.beginPath()
+    ctx.ellipse(x+TILE/2+2, y+TILE/2+4, s/2.2, s/5, 0, 0, Math.PI*2)
+    ctx.fill()
+
+    // Body
+    ctx.fillStyle = isDead ? '#cc3333' : '#4caf26'
+    ctx.beginPath()
+    ctx.ellipse(x+TILE/2, y+TILE/2+2, s/2.2, s/2.8, 0, 0, Math.PI*2)
+    ctx.fill()
+
+    // Belly
+    ctx.fillStyle = isDead ? '#e05555' : '#8bc34a'
+    ctx.beginPath()
+    ctx.ellipse(x+TILE/2, y+TILE/2+4, s/3.5, s/4.5, 0, 0, Math.PI*2)
+    ctx.fill()
+
+    // Back legs
+    ctx.fillStyle = isDead ? '#bb2222' : '#388e1a'
+    ctx.beginPath()
+    ctx.ellipse(x+TILE/2-s/3, y+TILE/2+s/3.5, s/5, s/8, -0.5, 0, Math.PI*2)
+    ctx.fill()
+    ctx.beginPath()
+    ctx.ellipse(x+TILE/2+s/3, y+TILE/2+s/3.5, s/5, s/8, 0.5, 0, Math.PI*2)
+    ctx.fill()
+
+    if (!isDead) {
+      // Eyes
+      const eyeOffsets = [-s/5, s/5]
+      const eyeY = y + TILE/2 - s/4
+      for (const ox of eyeOffsets) {
+        // Eye bump
+        ctx.fillStyle = '#5aba2e'
+        ctx.beginPath()
+        ctx.arc(x+TILE/2+ox, eyeY, s/5.5, 0, Math.PI*2)
+        ctx.fill()
+        // White
+        ctx.fillStyle = '#fff'
+        ctx.beginPath()
+        ctx.arc(x+TILE/2+ox, eyeY, s/7, 0, Math.PI*2)
+        ctx.fill()
+        // Pupil
+        ctx.fillStyle = '#111'
+        ctx.beginPath()
+        ctx.arc(x+TILE/2+ox+1, eyeY+1, s/14, 0, Math.PI*2)
+        ctx.fill()
+        // Glint
+        ctx.fillStyle = '#fff'
+        ctx.beginPath()
+        ctx.arc(x+TILE/2+ox+2, eyeY-1, s/28, 0, Math.PI*2)
+        ctx.fill()
+      }
+      // Smile
+      ctx.strokeStyle = '#2d6e10'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.arc(x+TILE/2, y+TILE/2+s/8, s/5.5, 0.3, Math.PI-0.3)
+      ctx.stroke()
+
+    } else {
+      // X eyes on death
+      const eyeY = y + TILE/2 - s/4
+      ctx.strokeStyle = '#fff'
+      ctx.lineWidth = 2.5
+      for (const ox of [-s/5, s/5]) {
+        const ex = x+TILE/2+ox
+        ctx.beginPath()
+        ctx.moveTo(ex-5, eyeY-5); ctx.lineTo(ex+5, eyeY+5)
+        ctx.moveTo(ex+5, eyeY-5); ctx.lineTo(ex-5, eyeY+5)
+        ctx.stroke()
+      }
+    }
+  }
+
+  function drawHUD() {
+    const hudY = (BOTTOM_BANK + 1) * TILE
+    ctx.fillStyle = '#0a0a18'
+    ctx.fillRect(0, hudY, canvas.width, canvas.height - hudY)
+
+    // Divider
+    ctx.strokeStyle = '#00ff8833'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(0, hudY); ctx.lineTo(canvas.width, hudY)
+    ctx.stroke()
+
+    // Hearts
+    ctx.font = '20px monospace'
+    ctx.textAlign = 'left'
+    let hx = 12
+    for (let i = 0; i < LIVES_START; i++) {
+      ctx.fillStyle = i < lives ? '#ff4757' : '#333'
+      ctx.fillText('♥', hx, hudY + 30)
+      hx += 26
+    }
+
+    // Level badge
+    ctx.fillStyle = '#00ff88'
+    ctx.font = 'bold 13px monospace'
+    ctx.textAlign = 'center'
+    ctx.fillText(`LVL ${level}`, canvas.width / 2, hudY + 28)
+
+    // Score
+    ctx.textAlign = 'right'
+    ctx.fillStyle = '#ffd700'
+    ctx.font = 'bold 16px monospace'
+    ctx.fillText(`${score}`, canvas.width - 12, hudY + 30)
+
+    // Message
+    if (message) {
+      ctx.textAlign = 'center'
+      ctx.fillStyle = '#ffffff'
+      ctx.font = 'bold 14px monospace'
+      ctx.fillText(message, canvas.width / 2, hudY + 52)
+    } else {
+      ctx.textAlign = 'center'
+      ctx.fillStyle = '#333'
+      ctx.font = '12px monospace'
+      ctx.fillText('↑ ↓ ← →  move', canvas.width / 2, hudY + 52)
+    }
+  }
+
+  // ── Overlay screens ───────────────────────────────────────────────
+  function drawOverlay(lines, colors) {
+    // Dim the board
+    ctx.fillStyle = 'rgba(5,5,20,0.82)'
+    ctx.fillRect(0, 0, canvas.width, (BOTTOM_BANK + 1) * TILE)
+
+    // Card background
+    const cw = 360, ch = lines.length * 38 + 40
+    const cx = (canvas.width - cw) / 2
+    const cy = (BOTTOM_BANK * TILE) / 2 - ch / 2
+
+    ctx.fillStyle = '#0d1b2a'
+    ctx.strokeStyle = '#00ff8866'
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.roundRect(cx, cy, cw, ch, 12)
+    ctx.fill()
+    ctx.stroke()
+
+    lines.forEach((line, i) => {
+      ctx.fillStyle  = colors[i] || '#ffffff'
+      ctx.font       = line.font || (i === 0 ? 'bold 26px monospace' : '15px monospace')
+      ctx.textAlign  = 'center'
+      ctx.fillText(line.text || line, canvas.width / 2, cy + 38 + i * 38)
+    })
+  }
+
+  function drawSplash() {
+    drawOverlay([
+      { text: '🐸  FROGGY JUMP', font: 'bold 28px monospace' },
+      '',
+      { text: '🌸  lily pad  →  safe', font: '14px monospace' },
+      { text: '🪵  log / water  →  dead', font: '14px monospace' },
+      '',
+      { text: 'SPACE or ↑ to start', font: 'bold 14px monospace' },
+    ], ['#00ff88','#555','#b7e4c7','#ffb3c1','#555','#ffd700'])
+  }
+
+  function drawLevelUp() {
+    drawOverlay([
+      { text: `LEVEL ${level - 1} CLEAR! 🎉`, font: 'bold 24px monospace' },
+      { text: `Score: ${score}`, font: '18px monospace' },
+      '',
+      { text: 'Lanes get faster...', font: '13px monospace' },
+      { text: 'SPACE to continue', font: 'bold 14px monospace' },
+    ], ['#ffd700','#00ff88','#555','#aaa','#ffd700'])
+  }
+
+  function drawGameOver() {
+    drawOverlay([
+      { text: 'GAME OVER', font: 'bold 30px monospace' },
+      { text: `Final Score: ${score}`, font: '18px monospace' },
+      { text: `Level reached: ${level}`, font: '15px monospace' },
+      '',
+      { text: 'SPACE or R to restart', font: 'bold 14px monospace' },
+    ], ['#ff4757','#ffd700','#aaa','#555','#00ff88'])
+  }
+
+  // ── Main loop ─────────────────────────────────────────────────────
+  let prevTime = performance.now()
+  resetFrog()
+
+  function loop(now) {
+    const dt = Math.min((now - prevTime) / 1000, 0.05)  // cap dt at 50ms
+    prevTime = now
+
+    update(dt)
+
+    // Background
+    ctx.fillStyle = '#0d0d1a'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+    drawBank(TOP_BANK, '🏁  GOAL', true)
+    drawLanes(lanes)
+    drawBank(BOTTOM_BANK, '🌿  START', false)
+    drawParticles()
+    drawFrog()
+    drawHUD()
+
+    if (state === 'splash')   drawSplash()
+    if (state === 'levelup')  drawLevelUp()
+    if (state === 'gameover') drawGameOver()
+
+    requestAnimationFrame(loop)
+  }
+
+  requestAnimationFrame(loop)
+</script>
+</body>
+</html>
